@@ -24,6 +24,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#define true 1
+#define false 0
 #define ARM_MATH_CM4
 #include "arm_math.h"
 /* USER CODE END Includes */
@@ -51,13 +53,16 @@ TIM_HandleTypeDef htim2;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-uint16_t DC_Red = 0, DC_IR = 0, pulse = 0; //lowest part of crest
+uint16_t pulse = 0; //lowest part of crest
+float bloodOx = 0;
 char pulseBuf[10];
 //EMA Filter Setup
 //0.08 without analog RC LP filter
 //0.06 with analog rc lp filter
 float alpha = 0.06f;
-float32_t prev_val = 0.0;
+float prev_RedVal = 0.0;
+float prev_IRVal = 0.0;
+
 struct timeValue
 {
 	uint32_t value;
@@ -66,8 +71,13 @@ struct timeValue
 struct timeValue lastRead, lastLastRead;
 
 uint32_t lastPeak = 0;
-struct timeValue max, min;
+struct timeValue redMax, redMin;
+struct timeValue irMax, irMin;
 uint32_t tick;
+int peakRange = 50;
+int RedLEDActive = true;
+int counter = 0;
+uint16_t AdcVal = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -80,8 +90,10 @@ static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 //void pulseCalc(uint32_t curVal, uint32_t tick);
 void transmitData();
-void updateMaxMin();
+void updateMaxMin(struct timeValue *max, struct timeValue *min, float prev_val);
 void peakFinder();
+void calculateBloodOx();
+float ratioToBloodOx(float ratio);
 float32_t map(float32_t prev_val, int inMax, int inMin, int outMax, int outMin);
 int subtractArray(int start, int subtractVal, int size);
 /* USER CODE END PFP */
@@ -125,14 +137,21 @@ int main(void)
   HAL_ADC_Start_IT(&hadc1); // Start ADC Conversion
   HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOC, IR_LED_Pin, GPIO_PIN_RESET);
+//  HAL_TIM_Base_Start_IT(&htim3);
+//  __HAL_TIM_ENABLE_IT(&htim3, TIM_IT_UPDATE);
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+//  int delayTime = 17;
+//  	int delayTime = 250;
+	HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_SET);
+	HAL_GPIO_WritePin(GPIOC, IR_LED_Pin, GPIO_PIN_RESET);
  while (1)
  {
-	  //RED LED ON
+
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -298,7 +317,7 @@ static void MX_TIM2_Init(void)
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 0;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 85936;
+  htim2.Init.Period = 42967;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
@@ -402,18 +421,103 @@ static void MX_GPIO_Init(void)
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
 	tick = HAL_GetTick();
-	uint16_t AdcVal = HAL_ADC_GetValue(&hadc1);
-	//EMA Filter
-	prev_val = alpha * (float32_t)AdcVal + (1-alpha) * prev_val;
-	transmitData();
-	updateMaxMin();
-	peakFinder();
+	AdcVal = HAL_ADC_GetValue(&hadc1);
+//	if (counter > 128) counter = 0;
+//	if (counter <= 128)
+//	{
+//		HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_SET);
+//		HAL_GPIO_WritePin(GPIOC, IR_LED_Pin, GPIO_PIN_RESET);
+//		RedLEDActive = true;
+//	}
+//	else if (counter <= 128)
+//	{
+//		HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_RESET);
+//		HAL_GPIO_WritePin(GPIOC, IR_LED_Pin, GPIO_PIN_SET);
+//		RedLEDActive = false;
+//	}
+	if (RedLEDActive)
+	{
+		alpha = 0.06;
+		//EMA Filter
+		prev_RedVal = alpha * (float32_t)AdcVal + (1.0f-alpha) * prev_RedVal;
+		updateMaxMin(&redMax, &redMin, prev_RedVal);
+		peakFinder();
+		transmitData();
+//		RedLEDActive = false;
+//		HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_RESET);
+//		HAL_GPIO_WritePin(GPIOC, IR_LED_Pin, GPIO_PIN_SET);
+	}
+//	else
+//	{
+//		alpha = 0.01;
+// 		prev_IRVal = alpha * (float32_t)AdcVal + (1.0f-alpha) * prev_IRVal;
+//		updateMaxMin(&irMax, &irMin, prev_IRVal);
+//		calculateBloodOx();
+//		transmitData();
+////		RedLEDActive = true;
+////		HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_RESET);
+////		HAL_GPIO_WritePin(GPIOC, IR_LED_Pin, GPIO_PIN_SET);
+//	}
+//	counter++;
+
+}
+//// Callback: timer has rolled over
+//void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+//{
+//  // Check which version of the timer triggered this callback and toggle LED
+//  if (htim == &htim3 )
+//  {
+//	  if (RedLEDActive)
+//	  {
+//		HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_RESET);
+//		HAL_GPIO_WritePin(GPIOC, IR_LED_Pin, GPIO_PIN_SET);
+//		RedLEDActive = false;
+//	  }
+//	  else
+//	  {
+//		HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_SET);
+//		HAL_GPIO_WritePin(GPIOC, IR_LED_Pin, GPIO_PIN_RESET);
+//		RedLEDActive = true;
+//	  }
+//  }
+//}
+/**************************************************************
+ * Function: updateMaxMin(struct timeValue max, struct timeValue min, float prev_val)
+ * Inputs: Max, Min, Current Value
+ * Outputs: None
+ * Update min/max for Red and IR readings in the last 4 seconds
+ **************************************************************/
+void updateMaxMin(struct timeValue *max, struct timeValue *min, float prev_val)
+{
+	if (prev_val > max->value || tick > max->timestamp + 1000 * 4) {max->value = prev_val; max->timestamp = tick;}
+	else if (prev_val < min->value || tick > min->timestamp + 1000 * 4) {min->value = prev_val; min->timestamp = tick;}
+	if (max->value - min->value > (redMax.value - redMin.value - 1) && tick > 10)
+	{
+		//update threshhold window
+		if (max->timestamp > min->timestamp)
+		{
+			min->value = max->value - (redMax.value - redMin.value - 1);
+			min->timestamp = max->timestamp - 1;
+		}
+		else
+		{
+			max->value = min->value + (redMax.value - redMin.value - 1);
+			max->timestamp = min->timestamp - 1;
+		}
+	}
 }
 
+/**************************************************************
+ * Function: peakFinder()
+ * Inputs/Outputs: None
+ * Find peak if Red LED value is within 8 arbitrary units of min
+ * 0.5 seconds between peaks at minimum, and value needs to be gte
+ * 	than surrounding ones
+ **************************************************************/
 void peakFinder()
 {
-	if (lastRead.value > min.value + 8
-			&& lastRead.value >= prev_val
+	if (lastRead.value > redMax.value - redMin.value - 1
+			&& lastRead.value >= prev_RedVal
 			&& lastRead.value >= lastLastRead.value
 			&& lastRead.timestamp - lastPeak > 500)
 	{
@@ -424,34 +528,30 @@ void peakFinder()
 	}
 	//shift all vals back
 	lastLastRead = lastRead;
-	lastRead.value = prev_val;
+	lastRead.value = prev_RedVal;
 	lastRead.timestamp = tick;
 }
-void updateMaxMin()
+
+void calculateBloodOx()
 {
-	if (prev_val > max.value || tick > max.timestamp + 1000 * 4) {max.value = prev_val; max.timestamp = tick;}
-	else if (prev_val < min.value || tick > min.timestamp + 1000 * 4) {min.value = prev_val; min.timestamp = tick;}
-	if (max.value - min.value > 10 && tick > 10)
-	{
-		//update threshhold window
-		if (max.timestamp > min.timestamp)
-		{
-			min.value = max.value - 10;
-			min.timestamp = max.timestamp - 1;
-		}
-		else
-		{
-			max.value = min.value + 10;
-			max.timestamp = min.timestamp - 1;
-		}
-	}
-}
-int subtractArray(int start, int subtractVal, int size)
-{
-	return (start - subtractVal >= 0) ? start - subtractVal : size + start - subtractVal;
+	float numerator = prev_RedVal / redMin.value;
+	float denom = prev_IRVal / irMin.value;
+	bloodOx = ratioToBloodOx(numerator / denom);
 }
 
-
+//apply piecewise ratio to blood ox per Beer-Lambert Law
+float ratioToBloodOx(float ratio)
+{
+	if (ratio >= 0.4f && ratio <= 1)
+		return -25.0f * ratio + 100.0;
+	else
+		return -32.6923f * ratio + 85;
+}
+/**************************************************************
+ * Function: transmitData()
+ * Inputs/Outputs: None
+ * Transmit data in form: time, redLED, IRLED, Pulse, Blood Ox
+ **************************************************************/
 void transmitData()
 {
 	//transmit time for analysis
@@ -461,20 +561,33 @@ void transmitData()
 
 	//transmit red LED data
 	char buffer[10];
-	snprintf(buffer, sizeof(buffer), "%u,", (int)prev_val);
-//	snprintf(buffer, sizeof(buffer), "%u,", (int)lastRead.value);
-
+	snprintf(buffer, sizeof(buffer), "%u,", (int)prev_RedVal);
 	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
 
-	//pulse
-	snprintf(pulseBuf, sizeof(pulseBuf), "%u\r\n", pulse);
-	HAL_UART_Transmit(&huart2, (uint8_t*)pulseBuf, strlen(pulseBuf), HAL_MAX_DELAY);
+	//transmit original data
+	snprintf(buffer, sizeof(buffer), "%u\r\n", (int)AdcVal);
+	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+//
+//	//transmit IR LED data
+//	snprintf(buffer, sizeof(buffer), "%u,", (int)prev_IRVal);
+//	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+//
+//	//pulse
+//	snprintf(pulseBuf, sizeof(pulseBuf), "%u,", pulse);
+//	HAL_UART_Transmit(&huart2, (uint8_t*)pulseBuf, strlen(pulseBuf), HAL_MAX_DELAY);
+//
+//	//transmit Blood Ox data
+//	snprintf(buffer, sizeof(buffer), "%u\r\n", (int)bloodOx);
+//	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
 }
 float32_t map(float32_t prev_val, int inMax, int inMin, int outMax, int outMin)
 {
 	return (prev_val - (float)inMin) * ((outMax-outMin) / (inMax - inMin)) + outMin;
 }
-
+int subtractArray(int start, int subtractVal, int size)
+{
+	return (start - subtractVal >= 0) ? start - subtractVal : size + start - subtractVal;
+}
 /* USER CODE END 4 */
 
 /**
