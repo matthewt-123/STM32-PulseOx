@@ -38,6 +38,8 @@
 /* USER CODE BEGIN PD */
 #define SAMPLE_RATE 256 //Hz
 #define ADC_BUF_LEN 2048
+#define sampleForSNR 2000
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -77,7 +79,10 @@ uint32_t tick;
 int peakRange = 50;
 int RedLEDActive = true;
 int counter = 0;
+
+uint64_t signal[sampleForSNR] = {0};
 uint16_t AdcVal = 0;
+int isPeak = false;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -96,6 +101,7 @@ void calculateBloodOx();
 float ratioToBloodOx(float ratio);
 float32_t map(float32_t prev_val, int inMax, int inMin, int outMax, int outMin);
 int subtractArray(int start, int subtractVal, int size);
+void ProcessSignalToNoise();
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -421,66 +427,51 @@ static void MX_GPIO_Init(void)
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
 	tick = HAL_GetTick();
-	AdcVal = HAL_ADC_GetValue(&hadc1);
-//	if (counter > 128) counter = 0;
-//	if (counter <= 128)
+	AdcVal = HAL_ADC_GetValue(&hadc1) * 1;
+	alpha = 0.06;
+	//EMA Filter
+	prev_RedVal = alpha * (float32_t)AdcVal + (1.0f-alpha) * prev_RedVal; //filtered
+	updateMaxMin(&redMax, &redMin, prev_RedVal);
+	peakFinder();
+	transmitData();
+
+	//SNR calculations
+//	if (counter < 1000) counter++;
+//	else if (counter >= 1000 && counter < 1000 + sampleForSNR)
 //	{
-//		HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_SET);
-//		HAL_GPIO_WritePin(GPIOC, IR_LED_Pin, GPIO_PIN_RESET);
-//		RedLEDActive = true;
-//	}
-//	else if (counter <= 128)
-//	{
-//		HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_RESET);
-//		HAL_GPIO_WritePin(GPIOC, IR_LED_Pin, GPIO_PIN_SET);
-//		RedLEDActive = false;
-//	}
-	if (RedLEDActive)
-	{
-		alpha = 0.06;
-		//EMA Filter
-		prev_RedVal = alpha * (float32_t)AdcVal + (1.0f-alpha) * prev_RedVal;
-		updateMaxMin(&redMax, &redMin, prev_RedVal);
-		peakFinder();
-		transmitData();
-//		RedLEDActive = false;
-//		HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_RESET);
-//		HAL_GPIO_WritePin(GPIOC, IR_LED_Pin, GPIO_PIN_SET);
-	}
-//	else
-//	{
-//		alpha = 0.01;
-// 		prev_IRVal = alpha * (float32_t)AdcVal + (1.0f-alpha) * prev_IRVal;
-//		updateMaxMin(&irMax, &irMin, prev_IRVal);
-//		calculateBloodOx();
+////		signal[counter - 1000] = prev_RedVal;
+//				signal[counter - 1000] = AdcVal;
+//
+//		counter++;
 //		transmitData();
-////		RedLEDActive = true;
-////		HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_RESET);
-////		HAL_GPIO_WritePin(GPIOC, IR_LED_Pin, GPIO_PIN_SET);
-//	}
-//	counter++;
+//	} else ProcessSignalToNoise();
 
 }
-//// Callback: timer has rolled over
-//void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-//{
-//  // Check which version of the timer triggered this callback and toggle LED
-//  if (htim == &htim3 )
-//  {
-//	  if (RedLEDActive)
-//	  {
-//		HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_RESET);
-//		HAL_GPIO_WritePin(GPIOC, IR_LED_Pin, GPIO_PIN_SET);
-//		RedLEDActive = false;
-//	  }
-//	  else
-//	  {
-//		HAL_GPIO_WritePin(GPIOC, RED_LED_Pin, GPIO_PIN_SET);
-//		HAL_GPIO_WritePin(GPIOC, IR_LED_Pin, GPIO_PIN_RESET);
-//		RedLEDActive = true;
-//	  }
-//  }
-//}
+void ProcessSignalToNoise()
+{
+	float sum_signal = 0;
+	for (int i = 0; i < sampleForSNR; i++)
+	{
+		sum_signal += signal[i];
+	}
+	float average = sum_signal / (float)sampleForSNR;
+	float power = 0;
+	//subtract mean aka dc offset aka average
+	//determine RMS
+	for (int j = 0; j < sampleForSNR; j++)
+	{
+		power += (signal[j] - average) * (signal[j] - average);
+	}
+	power /= (float)sampleForSNR;
+	//transmit power
+	char buffer[10];
+	snprintf(buffer, sizeof(buffer), "%u\r\n", (int)power);
+	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+	while (1)
+	{
+		//stop indefinitely
+	}
+}
 /**************************************************************
  * Function: updateMaxMin(struct timeValue max, struct timeValue min, float prev_val)
  * Inputs: Max, Min, Current Value
@@ -525,7 +516,9 @@ void peakFinder()
 		HAL_GPIO_TogglePin(GPIOA, LD2_Pin);
 		pulse = (60.0f * 1000.0f / ((float)lastRead.timestamp - (float)lastPeak));
 		lastPeak = lastRead.timestamp;
+		isPeak = true;
 	}
+	isPeak = false;
 	//shift all vals back
 	lastLastRead = lastRead;
 	lastRead.value = prev_RedVal;
@@ -564,17 +557,20 @@ void transmitData()
 	snprintf(buffer, sizeof(buffer), "%u,", (int)prev_RedVal);
 	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
 
-	//transmit original data
-	snprintf(buffer, sizeof(buffer), "%u\r\n", (int)AdcVal);
-	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+//	//transmit original data
+//	snprintf(buffer, sizeof(buffer), "%u\r\n", (int)AdcVal);
+//	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
 //
 //	//transmit IR LED data
 //	snprintf(buffer, sizeof(buffer), "%u,", (int)prev_IRVal);
 //	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
 //
-//	//pulse
-//	snprintf(pulseBuf, sizeof(pulseBuf), "%u,", pulse);
-//	HAL_UART_Transmit(&huart2, (uint8_t*)pulseBuf, strlen(pulseBuf), HAL_MAX_DELAY);
+	//pulse
+	snprintf(pulseBuf, sizeof(pulseBuf), "%u,", pulse);
+	HAL_UART_Transmit(&huart2, (uint8_t*)pulseBuf, strlen(pulseBuf), HAL_MAX_DELAY);
+
+	snprintf(buffer, sizeof(buffer), "%u\r\n", isPeak);
+	HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
 //
 //	//transmit Blood Ox data
 //	snprintf(buffer, sizeof(buffer), "%u\r\n", (int)bloodOx);
